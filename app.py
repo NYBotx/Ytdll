@@ -1,150 +1,161 @@
 import os
-import asyncio
+from pytube import YouTube
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask, request
-import yt_dlp
-from send import send_file
+import time
+import math
+from flask import Flask
 
-# Configuration
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-API_ID = 1234567  # Replace with your API ID
-API_HASH = "YOUR_API_HASH"
-APP_URL = "https://your-app-name.onrender.com"  # Replace with your Render app URL
-WEBHOOK_PATH = f"/{BOT_TOKEN}"
-WEBHOOK_URL = f"{APP_URL}{WEBHOOK_PATH}"
-DOWNLOAD_DIR = "./downloads"
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # Telegram max upload size: 2GB
+app_flask = Flask(__name__)  # For Render to detect a running service
 
-# Initialize Telegram Client
-app = Client("youtube_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
 
-# Flask App for Webhook
-flask_app = Flask(__name__)
+bot = Client("NYBotz", bot_token=BOT_TOKEN)
 
-# Ensure download directory exists
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+START_TEXT = """Hello {}, 
+I am a YouTube Downloader Bot. I can:
+- Download videos in various qualities (360p, 480p, 720p, 1080p)
+- Merge audio and video when necessary
+- Show progress while downloading and uploading!
 
+Just send me a YouTube video URL to get started!"""
 
-async def download_youtube_video(url, quality="best", audio_only=False):
-    """
-    Download video or audio from YouTube using yt-dlp.
+START_BUTTONS = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("Source Code", url="https://github.com/NYBotz")],
+        [InlineKeyboardButton("Help", callback_data="help")],
+    ]
+)
 
-    Parameters:
-        url (str): YouTube video URL.
-        quality (str): Video quality (e.g., 360, 720).
-        audio_only (bool): If True, download only audio.
+HELP_TEXT = """Send any YouTube URL to download videos. I support:
+- Videos in 360p, 480p, 720p, 1080p
+- Audio-only downloads
+- Automatic merging of audio and video when necessary.
+"""
 
-    Returns:
-        str: Path to the downloaded file.
-        dict: Info dictionary of the video.
-    """
-    ydl_opts = {
-        "format": f"bestvideo[height<={quality}]+bestaudio/best" if not audio_only else "bestaudio",
-        "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
-        "merge_output_format": "mp4",
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        file_name = ydl.prepare_filename(info)
-        return file_name, info
+progress_template = "[{0}{1}] {2}%\n"
 
+def humanbytes(size):
+    """Convert bytes to a readable format."""
+    power = 1024
+    n = 0
+    power_labels = ["B", "KB", "MB", "GB", "TB"]
+    while size > power:
+        size /= power
+        n += 1
+    return f"{round(size, 2)} {power_labels[n]}"
 
-@app.on_message(filters.command("start"))
+def progress_bar(current, total):
+    """Create a progress bar."""
+    percentage = current * 100 / total
+    filled = "█" * int(percentage / 10)
+    empty = "░" * (10 - int(percentage / 10))
+    return filled, empty, round(percentage, 2)
+
+@bot.on_message(filters.command("start"))
 async def start(client, message):
-    """Handle the /start command."""
     await message.reply_text(
-        f"👋 Hi {message.from_user.first_name}!\n"
-        "I can help you download YouTube videos and audio. Send me a YouTube link to get started!",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Help", callback_data="help")]]
-        ),
+        text=START_TEXT.format(message.from_user.mention),
+        reply_markup=START_BUTTONS,
+        disable_web_page_preview=True,
     )
 
+@bot.on_message(filters.regex(r"https?://(www\.)?youtube\.com/watch\?v=.+"))
+async def youtube_downloader(client, message):
+    url = message.text.strip()
+    yt = YouTube(url)
 
-@app.on_message(filters.regex(r"^https?://(www\.)?(youtube\.com|youtu\.be)/.+$"))
-async def youtube_link(client, message):
-    """Handle YouTube links."""
-    url = message.text
-    await message.reply_text(
-        "🔍 Processing your link... Please select an option:",
-        reply_markup=InlineKeyboardMarkup(
+    buttons = InlineKeyboardMarkup(
+        [
             [
-                [
-                    InlineKeyboardButton("360p", callback_data=f"download|{url}|360"),
-                    InlineKeyboardButton("480p", callback_data=f"download|{url}|480"),
-                    InlineKeyboardButton("720p", callback_data=f"download|{url}|720"),
-                    InlineKeyboardButton("1080p", callback_data=f"download|{url}|1080"),
-                ],
-                [
-                    InlineKeyboardButton("Audio Only", callback_data=f"download|{url}|audio"),
-                    InlineKeyboardButton("Cancel", callback_data="cancel"),
-                ],
-            ]
-        ),
+                InlineKeyboardButton(f"360p", callback_data=f"360|{url}"),
+                InlineKeyboardButton(f"480p", callback_data=f"480|{url}"),
+            ],
+            [
+                InlineKeyboardButton(f"720p", callback_data=f"720|{url}"),
+                InlineKeyboardButton(f"1080p", callback_data=f"1080|{url}"),
+            ],
+            [InlineKeyboardButton(f"Audio", callback_data=f"audio|{url}")],
+        ]
     )
 
+    await message.reply_photo(
+        photo=yt.thumbnail_url,
+        caption=f"**Title:** {yt.title}\n**Channel:** {yt.author}\nSelect the desired quality to download.",
+        reply_markup=buttons,
+    )
 
-@app.on_callback_query(filters.regex(r"^download\|"))
-async def handle_download(client, callback_query):
-    """Handle the download options."""
-    data = callback_query.data.split("|")
-    url, quality = data[1], data[2]
-    audio_only = quality == "audio"
-    status_message = await callback_query.message.edit_text("⏳ Starting download...")
+@bot.on_callback_query()
+async def callback_query(client, query):
+    data = query.data.split("|")
+    quality = data[0]
+    url = data[1]
+    yt = YouTube(url)
+    video_stream = None
 
-    try:
-        # Download video/audio
-        file_name, info = await download_youtube_video(url, quality if not audio_only else "best", audio_only)
+    await query.message.edit_text("**Downloading...** Please wait.")
+    start_time = time.time()
 
-        # Check file size
-        file_size = os.path.getsize(file_name)
-        if file_size > MAX_FILE_SIZE:
-            raise ValueError("File size exceeds Telegram's 2GB limit.")
+    if quality == "audio":
+        stream = yt.streams.filter(only_audio=True).first()
+        file_name = stream.download()
+    else:
+        # Fetch video and audio streams
+        video_stream = yt.streams.filter(res=quality + "p", mime_type="video/mp4").first()
+        audio_stream = yt.streams.filter(only_audio=True, mime_type="audio/mp4").first()
 
-        # Upload to Telegram
-        await send_file(
-            client,
-            chat_id=callback_query.message.chat.id,
-            file_path=file_name,
-            status_message=status_message,
-            caption=f"🎉 Download complete!\n**File:** `{file_name}`"
+        if not video_stream:
+            await query.message.edit_text(f"**{quality}p not available.** Choose another quality.")
+            return
+
+        # Download video
+        video_path = video_stream.download(filename=f"{yt.title}_video.mp4")
+        video_size = os.path.getsize(video_path)
+
+        # Check if audio is available
+        if audio_stream and video_stream.includes_audio_track:
+            file_name = video_path
+        else:
+            # Download audio and merge
+            audio_path = audio_stream.download(filename=f"{yt.title}_audio.mp4")
+            merged_file = f"{yt.title}_merged.mp4"
+            command = f"ffmpeg -i {video_path} -i {audio_path} -c:v copy -c:a aac {merged_file}"
+            subprocess.run(command, shell=True)
+
+            file_name = merged_file
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    size = os.path.getsize(file_name)
+
+    await query.message.edit_text(
+        f"**Download completed!**\n**File Size:** {humanbytes(size)}\n**Time Taken:** {round(elapsed_time, 2)} seconds.\nUploading to Telegram..."
+    )
+
+    # Uploading Progress
+    async def upload_progress(current, total):
+        filled, empty, percent = progress_bar(current, total)
+        await query.message.edit_text(
+            f"**Uploading...**\n{progress_template.format(filled, empty, percent)}"
         )
 
-    except Exception as e:
-        await status_message.edit_text(f"❌ Error: {str(e)}")
-    finally:
-        # Cleanup is handled in send.py
-        pass
-
-
-@app.on_callback_query(filters.regex("cancel"))
-async def cancel_download(client, callback_query):
-    """Handle cancel button."""
-    await callback_query.message.edit_text("🚫 Download canceled!")
-
-
-@app.on_callback_query(filters.regex("help"))
-async def help(client, callback_query):
-    """Display help information."""
-    await callback_query.message.edit_text(
-        "📖 **Help**\n\n"
-        "1️⃣ Send a YouTube link.\n"
-        "2️⃣ Choose a quality or audio-only option.\n"
-        "3️⃣ Wait for the file to be downloaded and uploaded.\n\n"
-        "💡 You can cancel the process anytime by clicking 'Cancel'."
+    # Upload the file
+    await client.send_document(
+        chat_id=query.message.chat.id,
+        document=file_name,
+        caption=f"**Title:** {yt.title}\n**Size:** {humanbytes(size)}",
+        progress=upload_progress,
     )
 
+    os.remove(file_name)
 
-@flask_app.route(WEBHOOK_PATH, methods=["POST"])
-def webhook():
-    """Webhook endpoint for Telegram updates."""
-    update = request.get_json()
-    asyncio.run(app.process_update(update))
-    return "OK", 200
+@app_flask.route("/")
+def home():
+    return "YouTube Downloader Bot is Running!"
 
+bot.start()
 
 if __name__ == "__main__":
-    app.start()
-    flask_app.run(host="0.0.0.0", port=8080)
-                                                       
+    app_flask.run(host="0.0.0.0", port=8080)
+    
